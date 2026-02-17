@@ -1,17 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	"github.com/klein2ms/chirpy/internal/database"
+	_ "github.com/lib/pq"
 	"io"
+	"log"
 	"net/http"
-	"slices"
-	"strings"
+	"os"
 	"sync/atomic"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -27,6 +34,16 @@ func (cfg *apiConfig) resetFileServerHits() {
 
 func main() {
 	cfg := apiConfig{}
+
+	_ = godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	cfg.dbQueries = database.New(db)
+
 	mux := http.NewServeMux()
 
 	mux.Handle(
@@ -54,15 +71,62 @@ func main() {
 	mux.HandleFunc(
 		"POST /admin/reset",
 		func(w http.ResponseWriter, r *http.Request) {
-			cfg.resetFileServerHits()
+			platform := os.Getenv("PLATFORM")
+			if platform != "dev" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+			}
+
+			err := cfg.dbQueries.DeleteUsers(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
 			w.WriteHeader(http.StatusOK)
 		})
 
 	mux.HandleFunc(
-		"POST /api/validate_chirp",
+		"POST /api/users",
 		func(w http.ResponseWriter, r *http.Request) {
-			var body Body
-			err := json.NewDecoder(r.Body).Decode(&body)
+
+			var createUserRequest CreateUserRequest
+			err := json.NewDecoder(r.Body).Decode(&createUserRequest)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			defer func(Body io.ReadCloser) {
+				_ = Body.Close()
+			}(r.Body)
+
+			user, err := cfg.dbQueries.CreateUser(r.Context(), createUserRequest.Email)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			toReturn := CreateUserResponse{
+				Id:        user.ID,
+				Email:     user.Email,
+				CreatedAt: user.CreatedAt,
+				UpdatedAt: user.UpdatedAt,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			err = json.NewEncoder(w).Encode(toReturn)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		})
+
+	mux.HandleFunc(
+		"POST /api/chirps",
+		func(w http.ResponseWriter, r *http.Request) {
+
+			var createChirpRequest CreateChirpRequest
+			err := json.NewDecoder(r.Body).Decode(&createChirpRequest)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -71,25 +135,74 @@ func main() {
 				_ = Body.Close()
 			}(r.Body)
 
-			var statusCode int
-			var content string
+			createChirpRequest = createChirpRequest.Sanitize()
 
-			if len(body.Body) > 140 {
-				fmt.Printf("Content-Length: %d\n", len(body.Body))
-				statusCode = http.StatusBadRequest
-				content = "{\"error\": \"Chirp is too long\"}"
-			} else {
-				content = fmt.Sprintf("{\"cleaned_body\": \"%s\"}", contentFilter(body.Body))
-				statusCode = http.StatusOK
+			if !createChirpRequest.IsValid() {
+				http.Error(w, "Chirp is too long", http.StatusBadRequest)
+				return
+			}
+
+			chirp, err := cfg.dbQueries.CreateChirp(
+				r.Context(),
+				database.CreateChirpParams{
+					Body:   createChirpRequest.Body,
+					UserID: createChirpRequest.UserId,
+				},
+			)
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(statusCode)
-			_, err = w.Write([]byte(content))
+			w.WriteHeader(http.StatusCreated)
+			err = json.NewEncoder(w).Encode(ToChirpResponse(chirp))
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte("{\"error\": \"Something went wrong\"}"))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
+
+		})
+
+	mux.HandleFunc(
+		"GET /api/chirps",
+		func(w http.ResponseWriter, r *http.Request) {
+			chirps, err := cfg.dbQueries.GetChirpsByCreatedAt(r.Context())
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+
+			var chirpsRes []CreateChirpResponse
+
+			for _, chirp := range chirps {
+				chirpsRes = append(chirpsRes, ToChirpResponse(chirp))
+			}
+
+			err = json.NewEncoder(w).Encode(chirpsRes)
+		})
+
+	mux.HandleFunc(
+		"GET /api/chirps/{chirpID}",
+		func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("chirpID")
+
+			chirp, err := cfg.dbQueries.GetChirp(r.Context(), uuid.MustParse(id))
+
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "Not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			err = json.NewEncoder(w).Encode(ToChirpResponse(chirp))
 		})
 
 	server := &http.Server{
@@ -98,22 +211,4 @@ func main() {
 	}
 
 	_ = server.ListenAndServe()
-}
-
-func contentFilter(content string) string {
-	words := strings.Fields(content)
-
-	badWords := []string{"kerfuffle", "sharbert", "fornax"}
-
-	for i, word := range words {
-		if slices.Contains(badWords, strings.ToLower(word)) {
-			words[i] = "****"
-		}
-	}
-
-	return strings.Join(words, " ")
-}
-
-type Body struct {
-	Body string `json:"body"`
 }

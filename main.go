@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -21,6 +22,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	jwtSecret      string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -39,12 +41,14 @@ func main() {
 
 	_ = godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	cfg.dbQueries = database.New(db)
+	cfg.jwtSecret = os.Getenv("JWT_SECRET")
 
 	mux := http.NewServeMux()
 
@@ -166,11 +170,25 @@ func main() {
 				return
 			}
 
-			toReturn := CreateUserResponse{
+			var duration time.Duration
+
+			if loginRequest.ExpiresInSeconds > 3600 || loginRequest.ExpiresInSeconds <= 0 {
+				duration = 3600 * time.Second
+			} else {
+				duration = time.Duration(loginRequest.ExpiresInSeconds) * time.Second
+			}
+
+			token, err := auth.MakeJWT(
+				user.ID,
+				cfg.jwtSecret,
+				duration)
+
+			toReturn := LoginUserResponse{
 				Id:        user.ID,
 				Email:     user.Email,
 				CreatedAt: user.CreatedAt,
 				UpdatedAt: user.UpdatedAt,
+				Token:     token,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -196,6 +214,18 @@ func main() {
 				_ = Body.Close()
 			}(r.Body)
 
+			token, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			user, err := auth.ValidateJWT(token, cfg.jwtSecret)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
 			createChirpRequest = createChirpRequest.Sanitize()
 
 			if !createChirpRequest.IsValid() {
@@ -207,12 +237,13 @@ func main() {
 				r.Context(),
 				database.CreateChirpParams{
 					Body:   createChirpRequest.Body,
-					UserID: createChirpRequest.UserId,
+					UserID: user,
 				},
 			)
 
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -220,6 +251,7 @@ func main() {
 			err = json.NewEncoder(w).Encode(ToChirpResponse(chirp))
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 
 		})
@@ -243,6 +275,10 @@ func main() {
 			}
 
 			err = json.NewEncoder(w).Encode(chirpsRes)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		})
 
 	mux.HandleFunc(
@@ -250,7 +286,13 @@ func main() {
 		func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("chirpID")
 
-			chirp, err := cfg.dbQueries.GetChirp(r.Context(), uuid.MustParse(id))
+			userId, err := uuid.Parse(id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			chirp, err := cfg.dbQueries.GetChirp(r.Context(), userId)
 
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
@@ -264,6 +306,10 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			err = json.NewEncoder(w).Encode(ToChirpResponse(chirp))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		})
 
 	server := &http.Server{

@@ -10,8 +10,7 @@ import (
 )
 
 type CreateChirpRequest struct {
-	Body   string    `json:"body"`
-	UserId uuid.UUID `json:"user_id"`
+	Body string `json:"body"`
 }
 
 func (req *CreateChirpRequest) IsValid() bool {
@@ -20,8 +19,7 @@ func (req *CreateChirpRequest) IsValid() bool {
 
 func (req *CreateChirpRequest) Sanitize() CreateChirpRequest {
 	return CreateChirpRequest{
-		Body:   contentFilter(req.Body),
-		UserId: req.UserId,
+		Body: contentFilter(req.Body),
 	}
 }
 

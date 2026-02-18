@@ -5,15 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/joho/godotenv"
-	"github.com/klein2ms/chirpy/internal/database"
-	_ "github.com/lib/pq"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"sync/atomic"
+
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	"github.com/klein2ms/chirpy/internal/auth"
+	"github.com/klein2ms/chirpy/internal/database"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -99,7 +101,17 @@ func main() {
 				_ = Body.Close()
 			}(r.Body)
 
-			user, err := cfg.dbQueries.CreateUser(r.Context(), createUserRequest.Email)
+			hashedPassword, err := auth.HashPassword(createUserRequest.Password)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
+
+			user, err := cfg.dbQueries.CreateUser(
+				r.Context(),
+				database.CreateUserParams{
+					Email:          createUserRequest.Email,
+					HashedPassword: hashedPassword,
+				})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -114,6 +126,55 @@ func main() {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
+			err = json.NewEncoder(w).Encode(toReturn)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		})
+
+	mux.HandleFunc(
+		"POST /api/login",
+		func(w http.ResponseWriter, r *http.Request) {
+
+			var loginRequest LoginUserRequest
+
+			err := json.NewDecoder(r.Body).Decode(&loginRequest)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			defer func(Body io.ReadCloser) {
+				_ = Body.Close()
+			}(r.Body)
+
+			user, err := cfg.dbQueries.GetUserByEmail(r.Context(), loginRequest.Email)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			isAuthenticated, err := auth.CheckPasswordHash(loginRequest.Password, user.HashedPassword)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if !isAuthenticated {
+				http.Error(w, "Incorrect email or password", http.StatusUnauthorized)
+				return
+			}
+
+			toReturn := CreateUserResponse{
+				Id:        user.ID,
+				Email:     user.Email,
+				CreatedAt: user.CreatedAt,
+				UpdatedAt: user.UpdatedAt,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
 			err = json.NewEncoder(w).Encode(toReturn)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)

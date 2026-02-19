@@ -23,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	jwtSecret      string
+	polkaApiKey    string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -49,6 +50,7 @@ func main() {
 
 	cfg.dbQueries = database.New(db)
 	cfg.jwtSecret = os.Getenv("JWT_SECRET")
+	cfg.polkaApiKey = os.Getenv("POLKA_KEY")
 
 	mux := http.NewServeMux()
 
@@ -122,10 +124,11 @@ func main() {
 			}
 
 			toReturn := CreateUserResponse{
-				Id:        user.ID,
-				Email:     user.Email,
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
+				Id:          user.ID,
+				Email:       user.Email,
+				CreatedAt:   user.CreatedAt,
+				UpdatedAt:   user.UpdatedAt,
+				IsChirpyRed: user.IsChirpyRed,
 			}
 
 			writeJson(w, http.StatusCreated, toReturn)
@@ -168,10 +171,11 @@ func main() {
 			}
 
 			toReturn := UpdateUserResponse{
-				Id:        user.ID,
-				Email:     user.Email,
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
+				Id:          user.ID,
+				Email:       user.Email,
+				CreatedAt:   user.CreatedAt,
+				UpdatedAt:   user.UpdatedAt,
+				IsChirpyRed: user.IsChirpyRed,
 			}
 
 			writeJson(w, http.StatusOK, toReturn)
@@ -241,6 +245,7 @@ func main() {
 				Email:        user.Email,
 				CreatedAt:    user.CreatedAt,
 				UpdatedAt:    user.UpdatedAt,
+				IsChirpyRed:  user.IsChirpyRed,
 				Token:        token,
 				RefreshToken: refreshToken,
 			}
@@ -358,10 +363,29 @@ func main() {
 	mux.HandleFunc(
 		"GET /api/chirps",
 		func(w http.ResponseWriter, r *http.Request) {
-			chirps, err := cfg.dbQueries.GetChirpsByCreatedAt(r.Context())
+			authorId := r.URL.Query().Get("author_id")
 
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+			var chirps []database.Chirp
+
+			if authorId != "" {
+				userId, err := uuid.Parse(authorId)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				chirps, err = cfg.dbQueries.GetChirpsByUserId(r.Context(), userId)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+			} else {
+				chirps, err = cfg.dbQueries.GetChirpsByCreatedAt(r.Context())
+
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 
 			var chirpsRes []CreateChirpResponse
@@ -445,6 +469,53 @@ func main() {
 
 			w.WriteHeader(http.StatusNoContent)
 			return
+		})
+
+	mux.HandleFunc(
+		"POST /api/polka/webhooks",
+		func(w http.ResponseWriter, r *http.Request) {
+			apiKey, err := auth.GetAPIKey(r.Header)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			if apiKey != cfg.polkaApiKey {
+				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
+			}
+
+			var userUpgradedEventRequest UserUpgradedEventRequest
+
+			err = json.NewDecoder(r.Body).Decode(&userUpgradedEventRequest)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			switch userUpgradedEventRequest.Event {
+			case "user.upgraded":
+				userId, err := uuid.Parse(userUpgradedEventRequest.Data.UserId)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				_, err = cfg.dbQueries.UpgradeToChirpyRed(r.Context(), userId)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						http.Error(w, "Not found", http.StatusNotFound)
+						return
+					}
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			default:
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
 		})
 
 	server := &http.Server{

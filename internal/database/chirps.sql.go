@@ -13,14 +13,12 @@ import (
 
 const createChirp = `-- name: CreateChirp :one
 INSERT INTO chirps (id, body, created_at, updated_at, user_id)
-VALUES (
-            gen_random_uuid(),
-            $1,
-            now(),
-            now(),
-            $2
-       )
-    RETURNING id, body, created_at, updated_at, user_id
+VALUES (gen_random_uuid(),
+        $1,
+        now(),
+        now(),
+        $2)
+RETURNING id, body, created_at, updated_at, user_id
 `
 
 type CreateChirpParams struct {
@@ -42,7 +40,8 @@ func (q *Queries) CreateChirp(ctx context.Context, arg CreateChirpParams) (Chirp
 }
 
 const deleteChirps = `-- name: DeleteChirps :exec
-DELETE FROM chirps
+DELETE
+FROM chirps
 `
 
 func (q *Queries) DeleteChirps(ctx context.Context) error {
@@ -51,7 +50,9 @@ func (q *Queries) DeleteChirps(ctx context.Context) error {
 }
 
 const getChirp = `-- name: GetChirp :one
-SELECT id, body, created_at, updated_at, user_id FROM chirps WHERE id = $1
+SELECT id, body, created_at, updated_at, user_id
+FROM chirps
+WHERE id = $1
 `
 
 func (q *Queries) GetChirp(ctx context.Context, id uuid.UUID) (Chirp, error) {
@@ -68,7 +69,9 @@ func (q *Queries) GetChirp(ctx context.Context, id uuid.UUID) (Chirp, error) {
 }
 
 const getChirpsByCreatedAt = `-- name: GetChirpsByCreatedAt :many
-SELECT id, body, created_at, updated_at, user_id FROM chirps ORDER BY created_at
+SELECT id, body, created_at, updated_at, user_id
+FROM chirps
+ORDER BY created_at
 `
 
 func (q *Queries) GetChirpsByCreatedAt(ctx context.Context) ([]Chirp, error) {

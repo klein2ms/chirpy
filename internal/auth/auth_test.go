@@ -134,3 +134,10 @@ func TestJWTRoundTrip(t *testing.T) {
 		assert.Equal(t, user2, parsed2)
 	})
 }
+
+func TestMakeRefreshToken(t *testing.T) {
+	token, err := MakeRefreshToken()
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, token)
+}

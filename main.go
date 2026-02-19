@@ -170,25 +170,35 @@ func main() {
 				return
 			}
 
-			var duration time.Duration
-
-			if loginRequest.ExpiresInSeconds > 3600 || loginRequest.ExpiresInSeconds <= 0 {
-				duration = 3600 * time.Second
-			} else {
-				duration = time.Duration(loginRequest.ExpiresInSeconds) * time.Second
-			}
+			duration := 3600 * time.Second
 
 			token, err := auth.MakeJWT(
 				user.ID,
 				cfg.jwtSecret,
 				duration)
 
+			refreshToken, err := auth.MakeRefreshToken()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			_, err = cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+				Token:  refreshToken,
+				UserID: user.ID,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
 			toReturn := LoginUserResponse{
-				Id:        user.ID,
-				Email:     user.Email,
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
-				Token:     token,
+				Id:           user.ID,
+				Email:        user.Email,
+				CreatedAt:    user.CreatedAt,
+				UpdatedAt:    user.UpdatedAt,
+				Token:        token,
+				RefreshToken: refreshToken,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -198,6 +208,76 @@ func main() {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+		})
+
+	mux.HandleFunc(
+		"POST /api/refresh",
+		func(w http.ResponseWriter, r *http.Request) {
+
+			bearerToken, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			refreshToken, err := cfg.dbQueries.GetRefreshToken(r.Context(), bearerToken)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			if refreshToken.RevokedAt.Valid {
+				http.Error(w, "Refresh token is revoked", http.StatusUnauthorized)
+				return
+			}
+
+			if refreshToken.ExpiresAt.Before(time.Now().UTC()) {
+				http.Error(w, "Refresh token is expired", http.StatusUnauthorized)
+				return
+			}
+
+			duration := 3600 * time.Second
+
+			token, err := auth.MakeJWT(
+				refreshToken.UserID,
+				cfg.jwtSecret,
+				duration)
+
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			toReturn := RefreshTokenResponse{
+				AuthToken: token,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			err = json.NewEncoder(w).Encode(toReturn)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		})
+
+	mux.HandleFunc(
+		"POST /api/revoke",
+		func(w http.ResponseWriter, r *http.Request) {
+			bearerToken, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			_, err = cfg.dbQueries.RevokeRefreshToken(r.Context(), bearerToken)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+			return
 		})
 
 	mux.HandleFunc(

@@ -128,13 +128,53 @@ func main() {
 				UpdatedAt: user.UpdatedAt,
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			err = json.NewEncoder(w).Encode(toReturn)
+			writeJson(w, http.StatusCreated, toReturn)
+		})
+
+	mux.HandleFunc(
+		"PUT /api/users",
+		func(w http.ResponseWriter, r *http.Request) {
+			id, err := authenticateUser(r, cfg.jwtSecret)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			var updateUserRequest UpdateUserRequest
+			err = json.NewDecoder(r.Body).Decode(&updateUserRequest)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			defer func(Body io.ReadCloser) {
+				_ = Body.Close()
+			}(r.Body)
+
+			passwordHash, err := auth.HashPassword(updateUserRequest.Password)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+
+			user, err := cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+				ID:             id,
+				Email:          updateUserRequest.Email,
+				HashedPassword: passwordHash,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			toReturn := UpdateUserResponse{
+				Id:        user.ID,
+				Email:     user.Email,
+				CreatedAt: user.CreatedAt,
+				UpdatedAt: user.UpdatedAt,
+			}
+
+			writeJson(w, http.StatusOK, toReturn)
 		})
 
 	mux.HandleFunc(
@@ -176,6 +216,10 @@ func main() {
 				user.ID,
 				cfg.jwtSecret,
 				duration)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 
 			refreshToken, err := auth.MakeRefreshToken()
 			if err != nil {
@@ -201,13 +245,7 @@ func main() {
 				RefreshToken: refreshToken,
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			err = json.NewEncoder(w).Encode(toReturn)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+			writeJson(w, http.StatusOK, toReturn)
 		})
 
 	mux.HandleFunc(
@@ -252,13 +290,7 @@ func main() {
 				AuthToken: token,
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			err = json.NewEncoder(w).Encode(toReturn)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+			writeJson(w, http.StatusOK, toReturn)
 		})
 
 	mux.HandleFunc(
@@ -294,13 +326,7 @@ func main() {
 				_ = Body.Close()
 			}(r.Body)
 
-			token, err := auth.GetBearerToken(r.Header)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusUnauthorized)
-				return
-			}
-
-			user, err := auth.ValidateJWT(token, cfg.jwtSecret)
+			user, err := authenticateUser(r, cfg.jwtSecret)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusUnauthorized)
 				return
@@ -326,14 +352,7 @@ func main() {
 				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			err = json.NewEncoder(w).Encode(ToChirpResponse(chirp))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
+			writeJson(w, http.StatusCreated, ToChirpResponse(chirp))
 		})
 
 	mux.HandleFunc(
@@ -345,20 +364,13 @@ func main() {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-
 			var chirpsRes []CreateChirpResponse
 
 			for _, chirp := range chirps {
 				chirpsRes = append(chirpsRes, ToChirpResponse(chirp))
 			}
 
-			err = json.NewEncoder(w).Encode(chirpsRes)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+			writeJson(w, http.StatusOK, chirpsRes)
 		})
 
 	mux.HandleFunc(
@@ -392,10 +404,77 @@ func main() {
 			}
 		})
 
+	mux.HandleFunc(
+		"DELETE /api/chirps/{chirpID}",
+		func(w http.ResponseWriter, r *http.Request) {
+			userId, err := authenticateUser(r, cfg.jwtSecret)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+
+			id := r.PathValue("chirpID")
+
+			chirpId, err := uuid.Parse(id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpId)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					http.Error(w, "Not found", http.StatusNotFound)
+					return
+				}
+
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if chirp.UserID != userId {
+				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
+			}
+
+			err = cfg.dbQueries.DeleteChirp(r.Context(), chirpId)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+			return
+		})
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
 
 	_ = server.ListenAndServe()
+}
+
+func authenticateUser(r *http.Request, jwtSecret string) (uuid.UUID, error) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	user, err := auth.ValidateJWT(token, jwtSecret)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	return user, nil
+}
+
+func writeJson[T any](w http.ResponseWriter, statusCode int, v T) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	err := json.NewEncoder(w).Encode(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }

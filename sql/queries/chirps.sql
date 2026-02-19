@@ -11,6 +11,11 @@ RETURNING *;
 DELETE
 FROM chirps;
 
+-- name: DeleteChirp :exec
+DELETE
+FROM chirps
+WHERE id = $1;
+
 -- name: GetChirpsByCreatedAt :many
 SELECT *
 FROM chirps

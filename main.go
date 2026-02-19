@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -364,6 +365,7 @@ func main() {
 		"GET /api/chirps",
 		func(w http.ResponseWriter, r *http.Request) {
 			authorId := r.URL.Query().Get("author_id")
+			sortOrder := r.URL.Query().Get("sort")
 
 			var chirps []database.Chirp
 
@@ -386,6 +388,18 @@ func main() {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
+			}
+
+			switch sortOrder {
+			case "desc":
+				sort.Slice(chirps, func(i, j int) bool {
+					return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+				})
+			case "asc":
+			default:
+				sort.Slice(chirps, func(i, j int) bool {
+					return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+				})
 			}
 
 			var chirpsRes []CreateChirpResponse
